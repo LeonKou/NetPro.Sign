@@ -1,6 +1,7 @@
 
 ## 接口签名
 
+![.NET Core](https://github.com/LeonKou/NetPro/workflows/.NET%20Core/badge.svg)  [![NuGet](https://img.shields.io/nuget/v/NetPro.Sign.svg)](https://nuget.org/packages/NetPro.Sign)
 
 主要防范请求参数被篡改和增加爬虫难度，签名组件应该在所有中间件之前执行，以保证其他组件不影响签名的正常执行(签名组件如在拦截类型的缓存中间件等之后执行，会让大部分请求绕过签名直接请求成功)
 
