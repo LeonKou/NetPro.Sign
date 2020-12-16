@@ -1,14 +1,9 @@
-﻿using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
+﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
-using Microsoft.VisualBasic.CompilerServices;
-using NetPro.Web.Core.Filters;
 using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace NetPro.Sign
 {
@@ -24,8 +19,7 @@ namespace NetPro.Sign
             if (ServiceProvider == null)
                 return null;
             var accessor = ServiceProvider?.GetService<IHttpContextAccessor>();
-            var context = accessor?.HttpContext;
-            return context?.RequestServices ?? ServiceProvider;
+            return accessor?.HttpContext?.RequestServices ?? ServiceProvider;
         }
 
         internal static T Resolve<T>()
@@ -36,12 +30,18 @@ namespace NetPro.Sign
 
     public static class VerifySignServiceExtensions
     {
+        /// <summary>
+        /// 接口签名提供特新方式与中间件方式，建议只使用一种方式
+        /// </summary>
+        /// <param name="services"></param>
+        /// <param name="setupAction"></param>
+        /// <returns></returns>
         public static IServiceCollection AddVerifySign(this IServiceCollection services, Action<VerifySignOption> setupAction = null)
         {
-            var configuration = services.BuildServiceProvider().GetRequiredService<IConfiguration>();
+            var configuration = services.BuildServiceProvider().GetService<IConfiguration>();
 
             var option = configuration.GetSection(nameof(VerifySignOption)).Get<VerifySignOption>();
-            if (option.Enable)
+            if (option?.Enabled??false)
             {
                 if (setupAction != null) services.ConfigureSign(setupAction);
 
@@ -55,22 +55,8 @@ namespace NetPro.Sign
                 {
                     services.AddScoped(typeof(IOperationFilter), item);//覆盖默认处理
                 }
-                switch (option.Scheme.ToLower())
-                {
-                    case "global":
-                        IoC.ServiceProvider = services.BuildServiceProvider();
-                        services.AddControllers(config =>
-                         {
-                             config.Filters.Add(typeof(VerifySignFilter));//签名验证启动
-                         });
-                        break;
-                    case "attribute":
-                        IoC.ServiceProvider = services.BuildServiceProvider();
-                        break;
-                    default:
-                        Console.WriteLine("签名以中间件方式启动");
-                        break;
-                }
+                IoC.ServiceProvider = services.BuildServiceProvider();
+
             }
             else
             {
@@ -91,6 +77,7 @@ namespace NetPro.Sign
 
     /// <summary>
     /// 签名摘要自定义实现
+    /// TODO 根据接口单一原则实现两个接口
     /// </summary>
     public interface IOperationFilter
     {
@@ -108,6 +95,6 @@ namespace NetPro.Sign
         /// <param name="secret">Ak/SK的secret</param>
         /// <param name="signMethod">客户端要求的加密方式;hmac，md5，hmac-sha256</param>
         /// <returns></returns>
-        public string GetSignhHash(string message, string secret, string signMethod);
+        public string GetSignhHash(string message, string secret, EncryptEnum signMethod = EncryptEnum.Default);
     }
 }

@@ -1,14 +1,13 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NetPro.Sign;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -18,29 +17,26 @@ namespace NetPro.Web.Core.Filters
     /// 验签特性
     /// </summary>
     /// <remarks>特性方式继承自动生效</remarks>
-    [Obsolete("废弃，建议使用中间件方式")]
+    [Obsolete("过时的特性,签名只适合于中间件方式,用特新方式可能会导致其他中间件提前拦截导致无法命中签名")]
     public class VerifySignAttribute : ActionFilterAttribute
     {
-        private readonly ILogger _logger;
-        private readonly IConfiguration _configuration;
-        private readonly IOperationFilter _verifySignCommon;
-        private readonly VerifySignOption _verifySignOption;
         public VerifySignAttribute()
         {
-            _logger = IoC.Resolve<ILogger<VerifySignAttribute>>();
-            Order = 1;
-            _configuration = IoC.Resolve<IConfiguration>();
-            _verifySignCommon = IoC.Resolve<IOperationFilter>();
-            _verifySignOption = IoC.Resolve<VerifySignOption>();
         }
 
         public override async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
         {
-            if (!_configuration.GetValue<bool>("VerifySignOption:Enable") ||
-                !_configuration.GetValue<string>("VerifySignOption:Scheme", "").ToLower().Equals("attribute", StringComparison.OrdinalIgnoreCase))
+            IServiceProvider serviceProvider = context.HttpContext.RequestServices;
+            var _logger = serviceProvider.GetRequiredService<ILogger<VerifySignAttribute>>();
+            var _configuration = serviceProvider.GetRequiredService<IConfiguration>();
+            var _verifySignCommon = serviceProvider.GetService<IOperationFilter>();
+            var _verifySignOption = serviceProvider.GetService<VerifySignOption>();
+
+            if (!_verifySignOption?.Enabled??true)
             {
                 goto gotoNext;
             }
+
             var descriptor = (Microsoft.AspNetCore.Mvc.Controllers.ControllerActionDescriptor)context.ActionDescriptor;
             var attributeController = (IgnoreSignAttribute)descriptor.ControllerTypeInfo.GetCustomAttributes(typeof(IgnoreSignAttribute), true).FirstOrDefault();
             if (attributeController != null)
@@ -50,7 +46,7 @@ namespace NetPro.Web.Core.Filters
             if (attribute != null)
                 goto gotoNext;
 
-            var result = await GetSignValue(context.HttpContext);
+            var result = await GetSignValue(context.HttpContext, _logger, _verifySignOption, _verifySignCommon);
             if (_verifySignOption.IsForce && !result.Item1)
             {
                 SignCommon.BuildErrorJson(context);
@@ -64,7 +60,7 @@ namespace NetPro.Web.Core.Filters
             await next();
         }
 
-        private async Task<Tuple<bool, string>> GetSignValue(HttpContext request)
+        private async Task<Tuple<bool, string>> GetSignValue(HttpContext request, ILogger<VerifySignAttribute> _logger, VerifySignOption _verifySignOption, IOperationFilter _verifySignCommon)
         {
             try
             {
@@ -74,30 +70,32 @@ namespace NetPro.Web.Core.Filters
                 {
                     queryDic.Add(item.Key.ToLower(), item.Value);
                 }
+                var encryptEnum = EncryptEnum.Default;
+
                 var commonParameters = _verifySignOption.CommonParameters;
+
                 if (!queryDic.ContainsKey(commonParameters.TimestampName) || !queryDic.ContainsKey(commonParameters.AppIdName) || !queryDic.ContainsKey(commonParameters.SignName))
                 {
-                    _logger.LogError("url参数中未找到签名所需参数[timestamp];[appid]或[sign]");
+                    _logger.LogWarning("url参数中未找到签名所需参数[timestamp];[appid];[EncryptFlag]或[sign]");
                     return Tuple.Create<bool, string>(false, "签名参数缺失");
                 }
 
-                string signMethod = "hmac-sha256";
-                if (queryDic.ContainsKey("signmethod"))
+                if (queryDic.ContainsKey(commonParameters.EncryptFlag) && int.TryParse(queryDic[commonParameters.EncryptFlag].ToString(), out int encryptint))
                 {
-                    signMethod = queryDic["signmethod"];
+                    encryptEnum = (EncryptEnum)encryptint;
                 }
 
                 var timestampStr = queryDic[commonParameters.TimestampName];
-                if (!long.TryParse(timestampStr, out long timestamp) || !CheckTime(timestamp))
+                if (!long.TryParse(timestampStr, out long timestamp) || !CheckTime(timestamp, _verifySignOption))
                 {
-                    _logger.LogError($"{timestampStr}时间戳已过期");
+                    _logger.LogWarning($"{timestampStr}时间戳已过期");
                     return Tuple.Create<bool, string>(false, "请校准客户端时间后再试");
                 }
 
                 var appIdString = queryDic[commonParameters.AppIdName].ToString();
                 if (string.IsNullOrEmpty(appIdString))
                 {
-                    _logger.LogError(@"The request parameter is missing the Ak/Sk appID parameter
+                    _logger.LogWarning(@"The request parameter is missing the Ak/Sk appID parameter
                                           VerifySign:{
                                             AppSecret:{
                                             [AppId]:[Secret]
@@ -121,32 +119,21 @@ namespace NetPro.Web.Core.Filters
                 var dicOrder = queryDic.OrderBy(s => s.Key, StringComparer.Ordinal).ToList();
 
                 StringBuilder requestStr = new StringBuilder();
-                StringBuilder logString = new StringBuilder();
-
                 for (int i = 0; i < dicOrder.Count(); i++)
                 {
-                    requestStr.Append($"{dicOrder[i].Key}{dicOrder[i].Value}");
-
                     if (i == dicOrder.Count() - 1)
-                    {
-                        logString.Append($"{dicOrder[i].Key}={dicOrder[i].Value}");
-                    }
-
+                        requestStr.Append($"{dicOrder[i].Key}={dicOrder[i].Value}");
                     else
-                    {
-                        logString.Append($"{dicOrder[i].Key}={dicOrder[i].Value}&");
-                    }
+                        requestStr.Append($"{dicOrder[i].Key}={dicOrder[i].Value}&");
                 }
 
                 var utf8Request = SignCommon.GetUtf8(requestStr.ToString());
 
-                var result = _verifySignCommon.GetSignhHash(utf8Request, _verifySignCommon.GetSignSecret(appIdString), signMethod);
+                var result = _verifySignCommon.GetSignhHash(utf8Request, _verifySignCommon.GetSignSecret(appIdString), encryptEnum);
                 if (_verifySignOption.IsDebug)
                 {
                     _logger.LogInformation($"请求接口地址：{request.Request.Path}");
-                    _logger.LogInformation($"拼装排序后的值{logString}");
-                    _logger.LogInformation($"拼装排序后的值{logString}");
-                    _logger.LogInformation($"摘要计算后的值：{result}");
+                    _logger.LogInformation($"拼装排序后的值{Convert.ToBase64String(Encoding.Default.GetBytes(utf8Request))}");
                     _logger.LogInformation($"摘要比对： {result}----{signvalue }");
                 }
                 else if (signvalue != result)
@@ -154,7 +141,6 @@ namespace NetPro.Web.Core.Filters
                     _logger.LogWarning(@$"摘要被篡改：[iphide]----{signvalue }
                                             查看详情，请设置VerifySignOption节点的IsDebug为true");
                 }
-
                 if (signvalue == result)
                 {
                     return Tuple.Create<bool, string>(true, "签名通过");
@@ -168,7 +154,7 @@ namespace NetPro.Web.Core.Filters
             }
         }
 
-        private bool CheckTime(long requestTime)
+        private bool CheckTime(long requestTime, VerifySignOption _verifySignOption)
         {
             long unixSeconds = DateTimeOffset.Now.ToUnixTimeSeconds();
 

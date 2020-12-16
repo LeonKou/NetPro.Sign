@@ -1,17 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.AspNetCore.Mvc.Formatters;
-using Microsoft.AspNetCore.WebUtilities;
-using Microsoft.Extensions.Configuration;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using Microsoft.Extensions.Configuration;
 
 namespace NetPro.Sign
 {
@@ -25,9 +12,9 @@ namespace NetPro.Sign
         }
 
         /// <summary>
-        /// 获取游戏secret
+        /// 获取appid对应的secret
         /// </summary>
-        /// <param name="gameId"></param>
+        /// <param name="appid"></param>
         /// <returns></returns>
         public virtual string GetSignSecret(string appid)
         {
@@ -37,25 +24,31 @@ namespace NetPro.Sign
         }
 
         /// <summary>
-        /// 
+        /// 签名算法；支持hmac-sha256；md5
         /// </summary>
         /// <param name="message"></param>
         /// <param name="secret"></param>
-        /// <param name="signMethod">签名算法；支持hmac-sha256；md5</param>
+        /// <param name="signMethod">哈希算法，默认HMACSHA256</param>
         /// <returns>签名16进制</returns>
-        public virtual string GetSignhHash(string message, string secret, string signMethod)
+        public virtual string GetSignhHash(string message, string secret, EncryptEnum signMethod = EncryptEnum.Default)
         {
-            switch (signMethod)
+            if (signMethod.HasFlag(EncryptEnum.Default) || signMethod.HasFlag(EncryptEnum.SignHMACSHA256))
             {
-                case "hmac-sha256":
-                    return SignCommon.GetHMACSHA256Sign(message, secret);
-                case "md5":
-                    return SignCommon.CreateMD5(message, secret);
-                default:
-                    return SignCommon.GetHMACSHA256Sign(message, secret);
+                return SignCommon.GetHMACSHA256Sign(message, secret);
             }
-            
-        }
 
+            else if (signMethod.HasFlag(EncryptEnum.SignSHA256))
+            {
+                return SignCommon.GetSHA256Sign(message, secret);
+            }
+            else if (signMethod.HasFlag(EncryptEnum.SignMD5))
+            {
+                return SignCommon.CreateMD5(message, secret);
+            }
+            else
+            {
+                return SignCommon.GetHMACSHA256Sign(message, secret);
+            }
+        }
     }
 }

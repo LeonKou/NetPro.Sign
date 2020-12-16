@@ -1,12 +1,12 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using NetPro.ShareRequestBody;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -22,7 +22,7 @@ namespace NetPro.Sign
         {
             var configuration = builder.ApplicationServices.GetService(typeof(IConfiguration)) as IConfiguration;
 
-            if (configuration.GetValue<bool>("VerifySignOption:Enable", false))
+            if (configuration.GetValue<bool>("VerifySignOption:Enabled", false))
                 return builder.UseMiddleware<SignMiddleware>();
             return builder;
         }
@@ -52,19 +52,20 @@ namespace NetPro.Sign
         /// Post:（从头排序后+body json整体 ）hash
         /// </summary>
         /// <param name="context"></param>
-        ///  <param name="responseCacheData"></param>
+        ///  <param name="requestCacheData"></param>
         /// <returns></returns>
         public async Task InvokeAsync(HttpContext context, RequestCacheData requestCacheData, VerifySignOption verifySignOption)
         {
-            if(!context.Request.Path.Value.StartsWith("/api"))
+            if (!context.Request.Path.Value.ToLower().StartsWith("/api"))
             {
                 await _next(context);
                 return;
             }
-            context.Request.EnableBuffering();
-            foreach (var item in verifySignOption.IgnoreRoute)
+            var endpoint = context.Features.Get<IEndpointFeature>()?.Endpoint;
+            if (endpoint != null)
             {
-                if (context.Request.Path.Value.Contains(item))
+                if (endpoint.Metadata
+                .Any(m => m is IgnoreSignAttribute))
                 {
                     _logger.LogInformation($"{context.Request.Path.Value}路径已绕过签名");
                     await _next(context);
@@ -72,17 +73,24 @@ namespace NetPro.Sign
                 }
             }
 
+            context.Request.EnableBuffering();
+
             var result = await GetSignValue(context, requestCacheData, verifySignOption);
             if (verifySignOption.IsForce && !result.Item1)
             {
-                context.Response.StatusCode = 400;
-                context.Response.ContentType = "application/json";
-
-                await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new { Code = -1, Msg = $"{result.Item2}" }, new JsonSerializerOptions
+                if (!context?.Response.HasStarted ?? false)
                 {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All)
-                }));
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    context.Response.ContentType = "application/text";
+                }
+
+                await context.Response.WriteAsync(result.Item2);
+                //await context.Response.WriteAsync(JsonSerializer.Serialize(new { Code = -1, Msg = $"{result.Item2}", Result = string.Empty }, new JsonSerializerOptions
+                //{
+                //    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                //    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All)
+                //}));
+                await Task.CompletedTask;
                 return;
             }
             else
@@ -102,30 +110,33 @@ namespace NetPro.Sign
                 {
                     queryDic.Add(item.Key.ToLower(), item.Value);
                 }
+
+                var encryptEnum = EncryptEnum.Default;
+
                 var commonParameters = verifySignOption.CommonParameters;
+
                 if (!queryDic.ContainsKey(commonParameters.TimestampName) || !queryDic.ContainsKey(commonParameters.AppIdName) || !queryDic.ContainsKey(commonParameters.SignName))
                 {
-                    _logger.LogError("url参数中未找到签名所需参数[timestamp];[appid]或[sign]");
+                    _logger.LogWarning("url参数中未找到签名所需参数[timestamp];[appid];[EncryptFlag]或[sign]");
                     return Tuple.Create<bool, string>(false, "签名参数缺失");
                 }
 
-                string signMethod = "hmac-sha256";
-                if (queryDic.ContainsKey("signmethod"))
+                if (queryDic.ContainsKey(commonParameters.EncryptFlag) && int.TryParse(queryDic[commonParameters.EncryptFlag].ToString(), out int encryptint))
                 {
-                    signMethod = queryDic["signmethod"];
+                    encryptEnum = (EncryptEnum)encryptint;
                 }
 
                 var timestampStr = queryDic[commonParameters.TimestampName];
                 if (!long.TryParse(timestampStr, out long timestamp) || !SignCommon.CheckTime(timestamp, verifySignOption.ExpireSeconds))
                 {
-                    _logger.LogError($"{timestampStr}时间戳已过期");
+                    _logger.LogWarning($"{timestampStr}时间戳已过期");
                     return Tuple.Create<bool, string>(false, "请校准客户端时间后再试");
                 }
 
                 var appIdString = queryDic[commonParameters.AppIdName].ToString();
                 if (string.IsNullOrEmpty(appIdString))
                 {
-                    _logger.LogError(@"The request parameter is missing the Ak/Sk appID parameter
+                    _logger.LogWarning(@"The request parameter is missing the Ak/Sk appID parameter
                                           VerifySign:{
                                             AppSecret:{
                                             [AppId]:[Secret]
@@ -157,32 +168,21 @@ namespace NetPro.Sign
                 var dicOrder = queryDic.OrderBy(s => s.Key, StringComparer.Ordinal).ToList();
 
                 StringBuilder requestStr = new StringBuilder();
-                StringBuilder logString = new StringBuilder();
-
-                //格式  参数名参数值
                 for (int i = 0; i < dicOrder.Count(); i++)
                 {
-                    requestStr.Append($"{dicOrder[i].Key}{dicOrder[i].Value}");
-
                     if (i == dicOrder.Count() - 1)
-                    {
-                        logString.Append($"{dicOrder[i].Key}={dicOrder[i].Value}");
-                    }
-
+                        requestStr.Append($"{dicOrder[i].Key}={dicOrder[i].Value}");
                     else
-                    {
-                        logString.Append($"{dicOrder[i].Key}={dicOrder[i].Value}&");
-                    }
+                        requestStr.Append($"{dicOrder[i].Key}={dicOrder[i].Value}&");
                 }
 
                 var utf8Request = SignCommon.GetUtf8(requestStr.ToString());
 
-                var result = _verifySignCommon.GetSignhHash(utf8Request, _verifySignCommon.GetSignSecret(appIdString), signMethod);
+                var result = _verifySignCommon.GetSignhHash(utf8Request, _verifySignCommon.GetSignSecret(appIdString), encryptEnum);
                 if (verifySignOption.IsDebug)
                 {
                     _logger.LogInformation($"请求接口地址：{request.Request.Path}");
-                    _logger.LogInformation($"拼装排序后的值{logString}");
-                    _logger.LogInformation($"摘要计算后的值：{result}");
+                    _logger.LogInformation($"拼装排序后的值{Convert.ToBase64String(Encoding.Default.GetBytes(utf8Request))}");
                     _logger.LogInformation($"摘要比对： {result}----{signvalue }");
                 }
                 else if (signvalue != result)

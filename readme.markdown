@@ -1,12 +1,19 @@
 
 ## 接口签名
 
-![.NET Core](https://github.com/LeonKou/NetPro/workflows/.NET%20Core/badge.svg)  [![NuGet](https://img.shields.io/nuget/v/NetPro.Sign.svg)](https://nuget.org/packages/NetPro.Sign)
 
 主要防范请求参数被篡改和增加爬虫难度，签名组件应该在所有中间件之前执行，以保证其他组件不影响签名的正常执行(签名组件如在拦截类型的缓存中间件等之后执行，会让大部分请求绕过签名直接请求成功)
 
 ### 接口签名使用
-默认为url参数与body参数合并成一个字符串再utf-8编码后进行摘要计算，得到的值转为16进制小写
+默认为url参数与body参数根据参数名升序排序合并成一个字符串再utf-8编码后进行摘要计算，得到的值转为16进制小写
+例如http://localhost:5000/api/user?timestamp=111111&appid=knasdfnas&name=yuhun&age=17&sign=jasdfksnlfsmf98sdflmdf8
+body:{"police":"noPo"}
+
+签名规则：将query参数名和"body"升序排序后：
+HMACSHA256(body={"police":"noPo"}&appid=knasdfnas&age=17&name=yuhun&timestamp=111111,secret)
+
+如果是md5,则在query参数末尾追加secret
+md5(body={"police":"noPo"}&appid=knasdfnas&age=17&name=yuhun&timestamp=111111+secret)
 
 startup注入
 
@@ -47,7 +54,7 @@ public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         /// <summary>
         /// 根据appid获取secret
         /// </summary>
-        /// <param name="gameId"></param>
+        /// <param name="appid"></param>
         /// <returns></returns>
         public string GetSignSecret(string appid)
         {
@@ -71,7 +78,7 @@ public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
 ### appsetting.json
 ```json
 "VerifySignOption": {
-"Enable": true,//是否开启签名
+"Enabled": true,//是否开启签名
 "IsDebug": true,//是否调试，显示更多敏感信息action加特式签名，global则全局
 "ExpireSeconds": 60,//时间戳过期时长，单位秒
 "CommonParameters": { //公共参数名的定义
@@ -123,12 +130,14 @@ public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         public IActionResult CreateSign()
         {
             object body=new { a = 1, b = "1" };
-            Dictionary<string, string> queryDic = new Dictionary<string, string>();
+            var query = HttpUtility.ParseQueryString(string.Empty);
+            query["appid"] = "111";       //必传 应用id    
+            query["acount"] = "我是你+"; //必传；加密方法
+
             long timestamp=SignCommon.CreateTimestamp();
-            queryDic.Add("appid", "111");//必填参数，参数名与appsetting.json的CommonParameters：
-            queryDic.Add("timestamp",timestamp);//必填参数，参数名与appsetting.json的CommonParameters：AppIdName要一致           
-            var sign = SignCommon.CreateSign("secret", queryDic: queryDic, body: body);//如果为Get请求，Body参数为空即可
-            queryDic.Add("sign", sign);//公共必填参数：appid；timestamp；sign
+             query["timestamp"] = timestamp;    //必传；时间戳                     
+            var sign = SignCommon.CreateSign("secret", queryDic: query, body: body);//如果为Get请求，Body参数为空即可
+             query["sign"] =sign;    //必传；加密方法
             //得到的queryDic便是完整url参数字典
             return Ok(sign);
         }
